@@ -31,7 +31,13 @@ import {
 } from './test-file-platform-filter.js';
 import { formatHarnessErrorMessage } from './format-harness-error.js';
 import { logger } from '@react-native-harness/tools';
-import { printSummary, writeTraceFile } from './diagnostics/index.js';
+import {
+  appendStepSummary,
+  printSummary,
+  summarizeRunKpis,
+  writeSummaryFile,
+  writeTraceFile,
+} from './diagnostics/index.js';
 import { toJestStatus } from './toJestStatus.js';
 
 const diagnosticsLogger = logger.child('diagnostics');
@@ -177,6 +183,11 @@ export const executeRun = async (
   };
 
   updateRunState();
+  session.lifecycle.emit({
+    type: 'phase',
+    phase: 'run.start',
+    attrs: { runId },
+  });
 
   await session.callHook('run:started', {
     runId,
@@ -227,6 +238,11 @@ export const executeRun = async (
 
       await session.callHook('test-file:started', { runId, file: relativeTestPath });
       const fileSpan = diagnostics.start('run.file', { file: relativeTestPath });
+      session.lifecycle.emit({
+        type: 'phase',
+        phase: 'test-file.start',
+        attrs: { file: relativeTestPath },
+      });
       let fileStatus: 'passed' | 'failed' | 'skipped' | 'todo' = 'failed';
 
       try {
@@ -336,6 +352,11 @@ export const executeRun = async (
         }
       } finally {
         fileSpan.end({ status: fileStatus });
+        session.lifecycle.emit({
+          type: 'phase',
+          phase: 'test-file.end',
+          attrs: { file: relativeTestPath, status: fileStatus },
+        });
       }
     }
   } catch (err) {
@@ -358,6 +379,12 @@ export const executeRun = async (
     await caseEventChain;
     unsubscribe();
     runSpan.end({ runId, status: finalStatus });
+    // Idle time between runs (watch mode) is not part of any run's metrics.
+    session.lifecycle.emit({
+      type: 'phase',
+      phase: 'run.end',
+      attrs: { runId, status: finalStatus },
+    });
 
     if (session.diagnostics.enabled) {
       const entries = session.diagnostics.flush();
@@ -365,6 +392,14 @@ export const executeRun = async (
         printSummary(entries, (line) => diagnosticsLogger.info(line));
         const tracePath = await writeTraceFile(entries, { projectRoot: rootDir, runId });
         diagnosticsLogger.info(`wrote diagnostics trace to ${tracePath}`);
+        const kpis = summarizeRunKpis(entries);
+        const summaryPath = await writeSummaryFile(kpis, {
+          projectRoot: rootDir,
+          runId,
+          sessionId: session.sessionId,
+        });
+        diagnosticsLogger.info(`wrote diagnostics summary to ${summaryPath}`);
+        await appendStepSummary(kpis);
       } catch (reportError) {
         diagnosticsLogger.warn('failed to write diagnostics report: %s', reportError);
       }
